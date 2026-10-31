@@ -30,7 +30,6 @@ export function Shell({ sidebar, appName = 'App', children }: ShellProps) {
   const { pathname } = useLocation()
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- close the mobile drawer after route navigation
     setOpen(false)
   }, [pathname])
 

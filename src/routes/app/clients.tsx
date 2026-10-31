@@ -45,7 +45,6 @@ function ClientsPage() {
       if (saved) {
         const parsed: unknown = JSON.parse(saved)
         if (Array.isArray(parsed)) {
-          // eslint-disable-next-line react-hooks/set-state-in-effect -- restore the user's browser-local demo list after hydration
           setClients(parsed as Client[])
         }
       }
