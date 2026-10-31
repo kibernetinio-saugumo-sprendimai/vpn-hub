@@ -1,32 +1,57 @@
 # SafeStack VPN Hub
 
-Savarankiškai talpinamas VPN administravimo prototipas: React, Vite ir Node.js/Hono. Blink paskyros ir paslaugų nereikia.
+Savarankiškai talpinamas Tailscale VPN tinklo (tailnet) administravimo centras: React, Vite, TanStack Router/Query ir Node.js/Hono.
 
-Tailscale skiltis gauna tikrus įrenginius ir leidžia užbaigti jų rakto galiojimą. Apžvalga, klientai ir serverių regionai yra demonstraciniai; vietiniai pakeitimai saugomi naršyklėje ir realių VPN prieigų nekeičia.
+Visa valdymo aplinka apsaugota administratoriaus slaptažodžiu ir dirba su tikrais Tailscale API v2 duomenimis:
+- **Apžvalga** – tikro laiko tailnet būsena, prisijungę įrenginiai, OS pasiskirstymas, DERP vėlinimas ir paskutinis aktyvumas.
+- **Įrenginiai** – paieška, filtravimas, naujų įrenginių patvirtinimas (`authorize`), raktų galiojimo keitimas (`keyExpiryDisabled`), skubus rakto atšaukimas (`expire`), subnet/Exit Node maršrutų valdymas ir įrenginių šalinimas.
+- **Mazgai ir maršrutai** – Exit Node mazgų, subnet maršrutizatorių, ACL žymėtų serverių (`tag:*`) ir DERP relėjų regionų stebėsena bei maršrutų tvirtinimas.
+- **Naudotojai** – realių tailnet naudotojų bei paslaugų tapatybių suvestinė pagal prijungtus įrenginius.
 
-## VPS / Docker
+## Reikalingos Tailscale API rakto teisės
 
-Reikia Docker su Compose ir HTTPS reverse proxy (Nginx, Caddy ar pan.).
+Tailscale administravimo konsolėje (**Settings → Keys → Generate access token**) sukurkite API raktą su šiomis teisėmis:
+- `Devices → Core` (**Write**) – įrenginių sąrašui, patvirtinimui, rakto galiojimui ir šalinimui.
+- `Devices → Routes` (**Write**) – subnet maršrutų ir Exit Node tvirtinimui.
 
-1. `cp .env.example .env`
-2. Sugeneruokite bent 16 simbolių administratoriaus slaptažodžio hash: `npm run password:hash` (Node.js >=22.12). Slaptažodis įvedant nerodomas. Jei Node nėra įdiegtas: `docker run --rm -it -v "$PWD/scripts:/scripts:ro" node:22-alpine node /scripts/password-hash.mjs`.
-3. Gautą `ADMIN_PASSWORD_HASH` reikšmę įrašykite į `.env`. Nustatykite `PUBLIC_ORIGIN=https://jusu-domenas.lt` be galinio `/` ir `TAILSCALE_API_KEY`. Failui suteikite `chmod 600 .env` teises.
-4. `docker compose up -d --build`
-5. HTTPS reverse proxy nukreipkite į `http://127.0.0.1:3001`. Naršyklėje atidarykite savo domeną ir Tailscale skiltyje prisijunkite administratoriaus slaptažodžiu.
+## Diegimas VPS serveryje (Docker Compose)
 
-Pavyzdinė Caddy konfigūracija:
+Reikia Docker su Compose ir HTTPS reverse proxy (Caddy, Nginx ar pan.).
 
-```caddyfile
-vpn.example.com {
-    reverse_proxy 127.0.0.1:3001
-}
-```
+1. Nukopijuokite pavyzdinę konfigūraciją:
+   ```sh
+   cp .env.example .env
+   chmod 600 .env
+   ```
+2. Sugeneruokite bent 16 simbolių administratoriaus slaptažodžio maišą (`scrypt`):
+   ```sh
+   npm run password:hash
+   ```
+   *(Jei Node.js serveryje neįdiegtas: `docker run --rm -it -v "$PWD/scripts:/scripts:ro" node:22-alpine node /scripts/password-hash.mjs`)*
+3. Į `.env` įrašykite:
+   - `ADMIN_PASSWORD_HASH=...`
+   - `PUBLIC_ORIGIN=https://vpn.jusu-domenas.lt` (tikslus HTTPS adresas be galinio `/`)
+   - `TAILSCALE_API_KEY=tskey-api-...`
+4. Paleiskite konteinerį:
+   ```sh
+   docker compose up -d --build
+   ```
+5. Nukreipkite HTTPS reverse proxy į `http://127.0.0.1:3001`. Pavyzdys su Caddy:
+   ```caddyfile
+   vpn.jusu-domenas.lt {
+       reverse_proxy 127.0.0.1:3001
+   }
+   ```
 
-`PUBLIC_ORIGIN` turi tiksliai sutapti su naršyklėje naudojamu protokolu, domenu ir prievadu. Produkcijos sesijai reikalingas HTTPS. Compose prievadas pasiekiamas tik iš VPS; viešą prieigą teikia reverse proxy. Tailscale raktas lieka serveryje. Naudokite tokeną su įrenginių skaitymo ir rakto galiojimo keitimo teisėmis.
+### Saugumo savybės
+- `HttpOnly`, `SameSite=Strict`, `Secure` sesijos slapukai (galioja 8 val., saugoma SHA-256 maiša serverio atmintyje).
+- Griežta `Origin` patikra visiems keičiantiems API kvietimams ir `Content-Security-Policy` be `unsafe-inline` skriptų.
+- Prisijungimo bandymų ribojimas pagal IP adresą (kai `TRUST_PROXY=true` už vietinio reverse proxy) bei bendras limitas.
+- Konteineris veikia neprivilegijuotu `node` naudotoju su `read_only: true`, `cap_drop: [ALL]` ir `no-new-privileges`.
 
-Sesijos saugomos serverio atmintyje, galioja 8 valandas ir panaikinamos atsijungiant. Perkrovus serverį visi turės prisijungti iš naujo. Šis variantas skirtas vienam administratoriui ir vienai serverio instancijai. Visai instancijai leidžiama iki 10 prisijungimo bandymų per minutę.
+## Vietinis kūrimas ir paleidimas
 
-## Vietinis paleidimas
+Reikalinga **Node.js >= 22.12**.
 
 ```sh
 npm ci
@@ -34,23 +59,33 @@ cp .env.example .env
 npm run password:hash
 ```
 
-Į `.env` įrašykite hash ir Tailscale raktą. Vietiniam darbui pakeiskite `PUBLIC_ORIGIN=http://localhost:3000` ir `NODE_ENV=development`.
+Vietiniam darbui `.env` faile nustatykite:
+```dotenv
+PUBLIC_ORIGIN=http://localhost:3000
+NODE_ENV=development
+ADMIN_PASSWORD_HASH=...
+TAILSCALE_API_KEY=tskey-api-...
+```
 
-Atskiruose terminaluose:
-
+Paleiskite dviejuose terminaluose:
 ```sh
 npm run dev:api
 npm run dev
 ```
 
-Atidarykite `http://localhost:3000`. Vite perduoda `/api` užklausas Node serveriui.
+Atidarykite `http://localhost:3000` – Vite automatiškai perduoda `/api` užklausas į `http://127.0.0.1:3001`.
 
-## Tikrinimas
+## Kokybės ir saugumo patikra
 
 ```sh
+npm run build
 npm run lint
 npm test
-npm run build
 ```
 
-Be Docker: `npm run build`, tada `node --env-file=.env dist-server/server.js`. Frontend ir API aptarnaujami vienu serveriu, todėl tiesioginis `/app/tailscale` atidarymas veikia ir perkrovus puslapį. `GET /api/health` skirtas serverio būklei tikrinti.
+Paleidimas produkcijos režimu be Docker:
+```sh
+npm run build
+npm start
+```
+`GET /api/health` grąžina `{"ok":true}` serverio būklės stebėsenai.

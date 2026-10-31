@@ -1,81 +1,433 @@
-import { useEffect, useState, type FormEvent } from 'react'
-import { createFileRoute } from '@tanstack/react-router'
-import { Activity, CircleCheck, Globe2, Gauge, Plus, Server, ShieldAlert, UsersRound, X } from 'lucide-react'
+import { useMemo } from 'react'
+import { createFileRoute, Link } from '@tanstack/react-router'
+import {
+  Check,
+  CircleAlert,
+  Globe2,
+  KeyRound,
+  RefreshCw,
+  Route as RouteIcon,
+  Server,
+  ShieldCheck,
+  Wifi,
+  WifiOff,
+} from 'lucide-react'
 import { toast } from 'sonner'
+import { TailscaleNotConfiguredCard } from '@/components/TailscaleNotConfiguredCard'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
-
-type ServerState = 'Veikia' | 'Priežiūra'
-type Region = { id: string; city: string; country: string; code: string; nodes: number; clients: number; load: number; ping: string; state: ServerState }
-
-const initialRegions: Region[] = [
-  { id: 'rg-01', city: 'Frankfurtas', country: 'Vokietija', code: 'DE', nodes: 8, clients: 1438, load: 42, ping: '18 ms', state: 'Veikia' },
-  { id: 'rg-02', city: 'Amsterdamas', country: 'Nyderlandai', code: 'NL', nodes: 6, clients: 1124, load: 68, ping: '24 ms', state: 'Veikia' },
-  { id: 'rg-03', city: 'Helsinkis', country: 'Suomija', code: 'FI', nodes: 4, clients: 872, load: 31, ping: '29 ms', state: 'Veikia' },
-  { id: 'rg-04', city: 'Singapūras', country: 'Singapūras', code: 'SG', nodes: 5, clients: 967, load: 56, ping: '42 ms', state: 'Veikia' },
-  { id: 'rg-05', city: 'Toronto', country: 'Kanada', code: 'CA', nodes: 3, clients: 548, load: 74, ping: '36 ms', state: 'Veikia' },
-  { id: 'rg-06', city: 'Tokijas', country: 'Japonija', code: 'JP', nodes: 4, clients: 711, load: 22, ping: '51 ms', state: 'Veikia' },
-]
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { ApiError } from '@/lib/api'
+import {
+  useDevicesQuery,
+  useUpdateDeviceKeyMutation,
+  useUpdateDeviceRoutesMutation,
+} from '@/lib/queries'
+import {
+  deriveDerpRegions,
+  getDeviceIpv4,
+  getDeviceName,
+  getDeviceStatus,
+  getExitNodeState,
+  getSubnetRoutes,
+  hasPendingRoutes,
+  isExitNodeRoute,
+  isInfrastructureNode,
+  type TailscaleDevice,
+} from '@/lib/tailscale'
 
 export const Route = createFileRoute('/app/servers')({
-  head: () => ({ meta: [{ title: 'Serveriai · SafeStack VPN' }, { name: 'description', content: 'VPN serverių regionų ir apkrovos valdymas.' }] }),
-  component: ServersPage,
+  head: () => ({
+    meta: [
+      { title: 'Mazgai ir maršrutai · SafeStack VPN Hub' },
+      { name: 'description', content: 'Tailscale Exit Node mazgai, subnet maršrutizatoriai, ACL serveriai ir DERP regionai.' },
+    ],
+  }),
+  component: InfrastructureNodesPage,
 })
 
-function ServersPage() {
-  const [regions, setRegions] = useState<Region[]>(initialRegions)
-  const [showForm, setShowForm] = useState(false)
-  const [city, setCity] = useState('')
-  const [country, setCountry] = useState('')
+function InfrastructureNodesPage() {
+  const devicesQuery = useDevicesQuery(true)
+  const updateRoutesMutation = useUpdateDeviceRoutesMutation()
+  const updateKeyMutation = useUpdateDeviceKeyMutation()
 
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem('nexora-vpn-regions')
-      if (saved) {
-        const parsed: unknown = JSON.parse(saved)
-        if (Array.isArray(parsed)) {
-          setRegions(parsed as Region[])
-        }
-      }
-    } catch {
-      toast.error('Nepavyko nuskaityti demonstracinių regionų.')
+  const devices = useMemo(() => devicesQuery.data?.devices ?? [], [devicesQuery.data])
+  const infraNodes = useMemo(() => devices.filter(isInfrastructureNode), [devices])
+  const derpRegions = useMemo(() => deriveDerpRegions(devices), [devices])
+
+  const metrics = useMemo(() => {
+    const exitNodes = devices.filter(d => getExitNodeState(d) !== 'none').length
+    const subnetRouters = devices.filter(d => getSubnetRoutes(d).advertised.length > 0).length
+    const taggedServers = devices.filter(d => d.tags.length > 0).length
+    return {
+      exitNodes,
+      subnetRouters,
+      taggedServers,
+      derpCount: derpRegions.length,
     }
-  }, [])
+  }, [devices, derpRegions])
 
-  useEffect(() => {
-    localStorage.setItem('nexora-vpn-regions', JSON.stringify(regions))
-  }, [regions])
-
-  const addRegion = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const cleanCity = city.trim()
-    const cleanCountry = country.trim()
-    if (!cleanCity || !cleanCountry) return
-    setRegions(current => [{ id: crypto.randomUUID(), city: cleanCity, country: cleanCountry, code: cleanCountry.slice(0, 2).toUpperCase(), nodes: 1, clients: 0, load: 0, ping: '—', state: 'Veikia' }, ...current])
-    setCity('')
-    setCountry('')
-    setShowForm(false)
-    toast.success('Regionas įtrauktas į šios naršyklės demonstracinį sąrašą.')
+  const approveAllRoutes = async (node: TailscaleDevice) => {
+    try {
+      await updateRoutesMutation.mutateAsync({
+        deviceId: node.id,
+        routes: node.advertisedRoutes,
+      })
+      toast.success(`Visi mazgo „${getDeviceName(node)}“ maršrutai patvirtinti.`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Nepavyko patvirtinti maršrutų.')
+    }
   }
 
-  const toggleRegion = (region: Region) => {
-    setRegions(current => current.map(item => item.id === region.id ? { ...item, state: item.state === 'Veikia' ? 'Priežiūra' : 'Veikia' } : item))
-    toast.success(`Demonstracinė būsena: ${region.city} ${region.state === 'Veikia' ? 'perkelta į priežiūrą' : 'vėl veikia'}.`)
+  const toggleSingleRoute = async (node: TailscaleDevice, route: string) => {
+    const enabled = new Set(node.enabledRoutes)
+    if (enabled.has(route)) {
+      enabled.delete(route)
+    } else {
+      enabled.add(route)
+    }
+    try {
+      await updateRoutesMutation.mutateAsync({
+        deviceId: node.id,
+        routes: Array.from(enabled),
+      })
+      toast.success('Maršruto būsena atnaujinta.')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Nepavyko atnaujinti maršruto.')
+    }
   }
 
-  const onlineCount = regions.filter(region => region.state === 'Veikia').length
-  const averageLoad = regions.length ? Math.round(regions.reduce((sum, region) => sum + region.load, 0) / regions.length) : 0
+  const enablePermanentKey = async (node: TailscaleDevice) => {
+    try {
+      await updateKeyMutation.mutateAsync({ deviceId: node.id, keyExpiryDisabled: true })
+      toast.success(`Mazgui „${getDeviceName(node)}“ įjungtas neterminuotas raktas.`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Nepavyko pakeisti rakto galiojimo.')
+    }
+  }
+
+  const isNotConfigured =
+    devicesQuery.error instanceof ApiError && devicesQuery.error.status === 503
 
   return (
     <div className="min-h-dvh bg-background">
       <div className="mx-auto max-w-[1500px] space-y-6 px-4 py-6 sm:px-6 lg:px-9 lg:py-8">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><div className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Infrastruktūra</div><h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Serveriai ir regionai</h1><p className="mt-2 text-sm text-muted-foreground">Peržiūrėkite vietovių būklę, apkrovą ir aktyvias jungtis.</p></div><Button onClick={() => setShowForm(value => !value)} className="h-10 rounded-xl shadow-sm">{showForm ? <X className="size-4" /> : <Plus className="size-4" />}{showForm ? 'Uždaryti' : 'Pridėti regioną'}</Button></div>
-        <div className="flex items-center gap-2 rounded-xl border border-chart-2/25 bg-chart-2/10 px-4 py-3 text-xs text-muted-foreground"><ShieldAlert className="size-4 shrink-0 text-chart-2" /><span><strong className="font-semibold text-foreground">Demonstracinė aplinka.</strong> Regionų būsena ir apkrova nėra susieta su realiais VPN serveriais.</span></div>
-        {showForm && <Card className="animate-fade-in border-primary/20 shadow-sm"><CardContent className="p-5"><form onSubmit={addRegion} className="grid gap-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end"><label className="space-y-1.5 text-xs font-medium">Miestas arba regionas<Input value={city} onChange={event => setCity(event.target.value)} placeholder="Pvz., Vilnius" required /></label><label className="space-y-1.5 text-xs font-medium">Šalis<Input value={country} onChange={event => setCountry(event.target.value)} placeholder="Pvz., Lietuva" required /></label><Button type="submit" className="h-9 rounded-lg"><Plus className="size-4" />Pridėti</Button></form></CardContent></Card>}
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Card className="border-border/80 shadow-sm"><CardContent className="flex items-center gap-3 p-4"><div className="rounded-xl bg-primary/10 p-2.5 text-primary"><Globe2 className="size-4" /></div><div><p className="text-xs text-muted-foreground">Regionai veikia</p><p className="mt-1 text-xl font-semibold tabular-nums">{onlineCount} <span className="text-sm font-normal text-muted-foreground">/ {regions.length}</span></p></div></CardContent></Card><Card className="border-border/80 shadow-sm"><CardContent className="flex items-center gap-3 p-4"><div className="rounded-xl bg-secondary p-2.5 text-secondary-foreground"><Server className="size-4" /></div><div><p className="text-xs text-muted-foreground">Serverių mazgai</p><p className="mt-1 text-xl font-semibold tabular-nums">{regions.reduce((sum, region) => sum + region.nodes, 0)}</p></div></CardContent></Card><Card className="border-border/80 shadow-sm"><CardContent className="flex items-center gap-3 p-4"><div className="rounded-xl bg-primary/10 p-2.5 text-primary"><UsersRound className="size-4" /></div><div><p className="text-xs text-muted-foreground">Aktyvios jungtys</p><p className="mt-1 text-xl font-semibold tabular-nums">{regions.reduce((sum, region) => sum + region.clients, 0).toLocaleString('lt-LT')}</p></div></CardContent></Card><Card className="border-border/80 shadow-sm"><CardContent className="flex items-center gap-3 p-4"><div className="rounded-xl bg-chart-2/15 p-2.5 text-chart-2"><Gauge className="size-4" /></div><div><p className="text-xs text-muted-foreground">Vidutinė apkrova</p><p className="mt-1 text-xl font-semibold tabular-nums">{averageLoad}%</p></div></CardContent></Card></div>
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{regions.map(region => <Card key={region.id} className="group border-border/80 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"><CardContent className="p-5"><div className="flex items-start justify-between"><div className="flex items-center gap-3"><div className="flex size-11 items-center justify-center rounded-2xl bg-secondary text-sm font-semibold tracking-wide text-secondary-foreground">{region.code}</div><div><h2 className="text-sm font-semibold">{region.city}</h2><p className="mt-0.5 text-xs text-muted-foreground">{region.country}</p></div></div><span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-medium ${region.state === 'Veikia' ? 'bg-primary/10 text-primary' : 'bg-chart-2/15 text-foreground'}`}><span className={`size-1.5 rounded-full ${region.state === 'Veikia' ? 'bg-primary' : 'bg-chart-2'}`} />{region.state}</span></div><div className="mt-5 grid grid-cols-3 gap-3 border-y border-border/70 py-4"><div><p className="text-[10px] text-muted-foreground">Mazgo serveriai</p><p className="mt-1 text-sm font-semibold tabular-nums">{region.nodes}</p></div><div><p className="text-[10px] text-muted-foreground">Jungtys</p><p className="mt-1 text-sm font-semibold tabular-nums">{region.clients.toLocaleString('lt-LT')}</p></div><div><p className="text-[10px] text-muted-foreground">Pingas</p><p className="mt-1 text-sm font-semibold tabular-nums">{region.ping}</p></div></div><div className="mt-4"><div className="mb-2 flex items-center justify-between text-[10px]"><span className="text-muted-foreground">Apkrova</span><span className="font-medium tabular-nums">{region.load}%</span></div><div className="h-1.5 overflow-hidden rounded-full bg-muted"><div className={`h-full rounded-full transition-all ${region.load > 70 ? 'bg-chart-2' : 'bg-primary'} ${region.load <= 25 ? 'w-1/4' : region.load <= 40 ? 'w-1/3' : region.load <= 55 ? 'w-1/2' : region.load <= 70 ? 'w-2/3' : region.load <= 85 ? 'w-3/4' : 'w-full'}`} /></div></div><div className="mt-4 flex items-center justify-between"><span className="flex items-center gap-1.5 text-[10px] text-muted-foreground"><Activity className="size-3.5" />WireGuard · UDP</span><Button variant="ghost" size="sm" onClick={() => toggleRegion(region)} className="h-8 rounded-lg text-xs text-muted-foreground hover:text-foreground">{region.state === 'Veikia' ? 'Priežiūra' : 'Atnaujinti'}</Button></div></CardContent></Card>)}</div>
-        <div className="flex items-center justify-center gap-2 py-2 text-[11px] text-muted-foreground"><CircleCheck className="size-3.5 text-primary" />Duomenys atnaujinti · pakeitimai saugomi tik šioje naršyklėje</div>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <div className="mb-2 text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase">
+              Infrastruktūra
+            </div>
+            <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
+              Mazgai ir maršrutai
+            </h1>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Tikri jūsų tailnet Exit Node mazgai, subnet maršrutizatoriai, ACL žymėti serveriai ir DERP relėjų regionai.
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            className="h-10 rounded-xl"
+            onClick={() => void devicesQuery.refetch()}
+            disabled={devicesQuery.isFetching}
+          >
+            <RefreshCw className={`size-4 ${devicesQuery.isFetching ? 'animate-spin' : ''}`} />
+            Atnaujinti
+          </Button>
+        </div>
+
+        {isNotConfigured ? (
+          <TailscaleNotConfiguredCard
+            message={devicesQuery.error instanceof Error ? devicesQuery.error.message : undefined}
+            onRetry={() => void devicesQuery.refetch()}
+            retrying={devicesQuery.isFetching}
+          />
+        ) : (
+          <>
+            {devicesQuery.isError && (
+              <div
+                role="alert"
+                className="flex flex-col gap-3 rounded-xl border border-destructive/25 bg-destructive/5 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="flex items-start gap-2.5">
+                  <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
+                  <span>
+                    {devicesQuery.error instanceof Error
+                      ? devicesQuery.error.message
+                      : 'Nepavyko gauti tinklo mazgų.'}
+                  </span>
+                </div>
+                <Button
+                  variant="outline"
+                  className="shrink-0 rounded-lg"
+                  onClick={() => void devicesQuery.refetch()}
+                  disabled={devicesQuery.isFetching}
+                >
+                  Bandyti dar kartą
+                </Button>
+              </div>
+            )}
+
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <Card className="border-border/80 shadow-sm">
+                <CardContent className="flex items-center gap-3 p-4">
+                  <div className="rounded-xl bg-primary/10 p-2.5 text-primary">
+                    <Globe2 className="size-4" />
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Exit Node mazgai</p>
+                    <p className="mt-1 text-xl font-semibold tabular-nums">{metrics.exitNodes}</p>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="border-border/80 shadow-sm">
+                <CardContent className="flex items-center gap-3 p-4">
+                  <div className="rounded-xl bg-primary/10 p-2.5 text-primary">
+                    <RouteIcon className="size-4" />
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Subnet maršrutizatoriai</p>
+                    <p className="mt-1 text-xl font-semibold tabular-nums">{metrics.subnetRouters}</p>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="border-border/80 shadow-sm">
+                <CardContent className="flex items-center gap-3 p-4">
+                  <div className="rounded-xl bg-secondary p-2.5 text-secondary-foreground">
+                    <Server className="size-4" />
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">ACL žymėti serveriai</p>
+                    <p className="mt-1 text-xl font-semibold tabular-nums">{metrics.taggedServers}</p>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="border-border/80 shadow-sm">
+                <CardContent className="flex items-center gap-3 p-4">
+                  <div className="rounded-xl bg-secondary p-2.5 text-secondary-foreground">
+                    <ShieldCheck className="size-4" />
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Matomi DERP regionai</p>
+                    <p className="mt-1 text-xl font-semibold tabular-nums">{metrics.derpCount}</p>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+
+            {devicesQuery.isPending && devices.length === 0 ? (
+              <div className="flex items-center justify-center gap-2 rounded-2xl border border-border/80 py-16 text-sm text-muted-foreground">
+                <RefreshCw className="size-4 animate-spin" />
+                Gaunama mazgų ir maršrutų informacija...
+              </div>
+            ) : (
+              <>
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-base font-semibold tracking-tight">
+                      Tinklo mazgai, maršrutai ir Exit Node
+                    </h2>
+                    <Link
+                      to="/app/tailscale"
+                      className="text-xs font-medium text-primary hover:underline"
+                    >
+                      Visi įrenginiai ({devices.length})
+                    </Link>
+                  </div>
+
+                  {infraNodes.length === 0 ? (
+                    <Card className="border-border/80 shadow-sm">
+                      <CardContent className="p-8 text-center">
+                        <Server className="mx-auto size-8 text-muted-foreground/50" />
+                        <p className="mt-3 text-sm font-medium">
+                          Šiuo metu tailnet neturi Exit Node ar Subnet maršrutizatorių
+                        </p>
+                        <p className="mx-auto mt-1.5 max-w-xl text-xs leading-relaxed text-muted-foreground">
+                          Kai serveryje paleisite{' '}
+                          <code className="rounded bg-muted px-1.5 py-0.5 font-mono">
+                            tailscale up --advertise-exit-node
+                          </code>{' '}
+                          arba{' '}
+                          <code className="rounded bg-muted px-1.5 py-0.5 font-mono">
+                            --advertise-routes=10.0.0.0/24
+                          </code>
+                          , mazgas pasirodys čia ir galėsite vienu paspaudimu patvirtinti maršrutus.
+                        </p>
+                      </CardContent>
+                    </Card>
+                  ) : (
+                    <div className="grid gap-4 md:grid-cols-2">
+                      {infraNodes.map(node => {
+                        const status = getDeviceStatus(node)
+                        const ipv4 = getDeviceIpv4(node)
+                        const pending = hasPendingRoutes(node)
+                        const enabledSet = new Set(node.enabledRoutes)
+
+                        return (
+                          <Card key={node.id} className="border-border/80 shadow-sm">
+                            <CardContent className="space-y-4 p-5">
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <h3 className="text-base font-semibold">
+                                      {getDeviceName(node)}
+                                    </h3>
+                                    {node.tags.map(tag => (
+                                      <span
+                                        key={tag}
+                                        className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+                                      >
+                                        {tag}
+                                      </span>
+                                    ))}
+                                  </div>
+                                  <p className="mt-1 font-mono text-xs text-muted-foreground">
+                                    {ipv4 ?? '—'} · <span className="capitalize font-sans">{node.os || 'Nežinoma OS'}</span>
+                                    {node.derp ? ` · DERP: ${node.derp}` : ''}
+                                  </p>
+                                </div>
+                                <span
+                                  className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ${
+                                    status.kind === 'online'
+                                      ? 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-400'
+                                      : 'bg-muted text-muted-foreground'
+                                  }`}
+                                >
+                                  {status.kind === 'online' ? (
+                                    <Wifi className="size-3" />
+                                  ) : (
+                                    <WifiOff className="size-3" />
+                                  )}
+                                  {status.label}
+                                </span>
+                              </div>
+
+                              {node.advertisedRoutes.length > 0 ? (
+                                <div className="space-y-2 border-t border-border/70 pt-3">
+                                  <div className="flex items-center justify-between text-xs">
+                                    <span className="font-medium text-muted-foreground">
+                                      Skelbiami maršrutai ({node.enabledRoutes.length}/
+                                      {node.advertisedRoutes.length} patvirtinta)
+                                    </span>
+                                    {pending && (
+                                      <Button
+                                        size="sm"
+                                        disabled={updateRoutesMutation.isPending}
+                                        onClick={() => void approveAllRoutes(node)}
+                                        className="h-7 rounded-lg px-2.5 text-xs"
+                                      >
+                                        <Check className="size-3" />
+                                        Patvirtinti visus
+                                      </Button>
+                                    )}
+                                  </div>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {node.advertisedRoutes.map(route => {
+                                      const isEnabled = enabledSet.has(route)
+                                      return (
+                                        <button
+                                          key={route}
+                                          type="button"
+                                          disabled={updateRoutesMutation.isPending}
+                                          onClick={() => void toggleSingleRoute(node, route)}
+                                          className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 font-mono text-xs transition-colors ${
+                                            isEnabled
+                                              ? 'border-primary/30 bg-primary/10 text-primary'
+                                              : 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                                          }`}
+                                          title={
+                                            isEnabled
+                                              ? 'Spustelėkite, kad išjungtumėte šį maršrutą'
+                                              : 'Spustelėkite, kad patvirtintumėte šį maršrutą'
+                                          }
+                                        >
+                                          <span>{route}</span>
+                                          <span className="font-sans text-[10px] opacity-80">
+                                            {isExitNodeRoute(route) ? '(Exit)' : ''}
+                                            {isEnabled ? ' · Aktyvus' : ' · Laukia'}
+                                          </span>
+                                        </button>
+                                      )
+                                    })}
+                                  </div>
+                                </div>
+                              ) : (
+                                <p className="border-t border-border/70 pt-3 text-xs text-muted-foreground">
+                                  ACL žymėtas mazgas be papildomų skelbiamų subnet maršrutų.
+                                </p>
+                              )}
+
+                              <div className="flex items-center justify-between border-t border-border/70 pt-3 text-xs">
+                                <span className="text-muted-foreground">
+                                  Raktas:{' '}
+                                  <strong className="font-medium text-foreground">
+                                    {node.keyExpiryDisabled ? 'Neterminuotas' : 'Su galiojimo terminu'}
+                                  </strong>
+                                </span>
+                                {!node.keyExpiryDisabled && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={updateKeyMutation.isPending}
+                                    onClick={() => void enablePermanentKey(node)}
+                                    className="h-7 rounded-lg px-2 text-xs"
+                                  >
+                                    <KeyRound className="size-3.5" />
+                                    Padaryti neterminuotą
+                                  </Button>
+                                )}
+                              </div>
+                            </CardContent>
+                          </Card>
+                        )
+                      })}
+                    </div>
+                  )}
+                </section>
+
+                <Card className="border-border/80 shadow-sm">
+                  <CardHeader className="px-5 pt-5 pb-3">
+                    <CardTitle className="text-base font-semibold">
+                      Tailscale DERP relėjų regionai
+                    </CardTitle>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Tikri vėlinimo ir maršrutizavimo duomenys iš prijungtų įrenginių telemetrijos
+                    </p>
+                  </CardHeader>
+                  <CardContent className="px-5 pb-5">
+                    {derpRegions.length === 0 ? (
+                      <p className="py-6 text-center text-xs text-muted-foreground">
+                        Įrenginių DERP ryšio telemetrijos duomenų kol kas nėra.
+                      </p>
+                    ) : (
+                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                        {derpRegions.map(region => (
+                          <div
+                            key={region.region}
+                            className="rounded-xl border border-border/70 bg-muted/20 p-3.5"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="truncate text-sm font-semibold">{region.region}</p>
+                              <span className="font-mono text-xs font-semibold text-primary tabular-nums">
+                                {region.avgLatencyMs !== null ? `${region.avgLatencyMs} ms` : '—'}
+                              </span>
+                            </div>
+                            <div className="mt-2 flex items-center justify-between text-[11px] text-muted-foreground">
+                              <span>Pirmenybinis: {region.preferredCount} įreng.</span>
+                              <span>
+                                {region.minLatencyMs !== null
+                                  ? `min. ${region.minLatencyMs} ms`
+                                  : `matuota: ${region.measuredCount}`}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </>
+            )}
+          </>
+        )}
       </div>
     </div>
   )

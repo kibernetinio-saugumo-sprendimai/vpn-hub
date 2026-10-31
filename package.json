@@ -8,9 +8,9 @@
   },
   "scripts": {
     "dev": "vite",
-    "dev:api": "node --env-file=.env --import tsx --watch backend/server.ts",
+    "dev:api": "node --env-file-if-exists=.env --import tsx --watch backend/server.ts",
     "build": "vite build && tsc -p tsconfig.server.json",
-    "start": "node dist-server/server.js",
+    "start": "node --env-file-if-exists=.env dist-server/server.js",
     "lint:types": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
     "lint:js": "eslint .",
     "lint": "npm run lint:types && npm run lint:js",
