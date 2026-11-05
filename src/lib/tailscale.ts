@@ -61,7 +61,7 @@ export function getDeviceFqdn(device: TailscaleDevice): string | null {
 }
 
 export function getDeviceIpv4(device: TailscaleDevice): string | null {
-  return device.addresses.find(addr => addr.includes('.')) ?? device.addresses[0] ?? null
+  return device.addresses.find(addr => addr.includes('.') && !addr.includes(':')) ?? null
 }
 
 export function getDeviceIpv6(device: TailscaleDevice): string | null {
@@ -211,14 +211,15 @@ export function deriveTailnetUsers(devices: TailscaleDevice[]): TailnetUserSumma
     const osSet = new Set<string>()
     let latestMs = 0
     let latestIso: string | undefined
+    const observedNow = new Date().toISOString()
 
     for (const dev of userDevices) {
       if (dev.os) osSet.add(dev.os)
       if (dev.connectedToControl) {
-        const current = dev.lastSeen ? new Date(dev.lastSeen).getTime() : Date.now()
+        const current = Date.parse(observedNow)
         if (current > latestMs) {
           latestMs = current
-          latestIso = dev.lastSeen
+          latestIso = observedNow
         }
       } else if (dev.lastSeen) {
         const seenMs = new Date(dev.lastSeen).getTime()

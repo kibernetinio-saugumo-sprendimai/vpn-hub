@@ -231,13 +231,25 @@ function mapUpstreamError(status: number): string {
 
 function getClientKey(c: Context, trustProxy: boolean): string {
   if (!trustProxy) return 'default'
+  // Exactly one trusted local reverse proxy: its appended, rightmost address is authoritative.
   const forwarded = c.req.header('x-forwarded-for')
-  if (forwarded) {
-    const first = forwarded.split(',')[0]?.trim()
-    if (first && first.length <= 64) return first
+  const address = forwarded !== undefined
+    ? forwarded.split(',').at(-1)?.trim()
+    : c.req.header('x-real-ip')?.trim()
+  if (!address || address.length > 64) return 'default'
+  const family = isIP(address)
+  if (family === 4) return address
+  if (family === 6 && !address.includes('%')) {
+    // Canonicalize equivalent IPv6 spellings into a single rate-limit bucket.
+    const canonical = new URL(`http://[${address}]/`).hostname.slice(1, -1)
+    // Treat the common IPv4-mapped form as the same client as native IPv4.
+    const mapped = canonical.match(/^::ffff:([a-f0-9]+):([a-f0-9]+)$/)
+    if (mapped) {
+      const high = parseInt(mapped[1], 16), low = parseInt(mapped[2], 16)
+      return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`
+    }
+    return canonical
   }
-  const realIp = c.req.header('x-real-ip')?.trim()
-  if (realIp && realIp.length <= 64) return realIp
   return 'default'
 }
 
@@ -565,31 +577,22 @@ export function createApp(config: Config, upstream: typeof fetch = fetch) {
 export function mountStaticAssets(app: Hono, distRoot: string) {
   if (!existsSync(distRoot)) return app
 
-  app.use(
-    '*',
-    serveStatic({
-      root: distRoot,
-      onFound: (_filePath, c) => {
-        if (c.req.path.startsWith('/assets/')) {
-          c.header('Cache-Control', 'public, max-age=31536000, immutable')
-        } else if (c.req.path === '/' || c.req.path.endsWith('.html')) {
-          c.header('Cache-Control', 'no-cache')
-        }
-      },
-    }),
-  )
+  // Set headers on the finalized Response: the Node adapter creates it before onFound.
+  app.use('*', async (c, next) => {
+    await next()
+    const cache = c.res.status >= 200 && c.res.status < 300
+      ? c.req.path.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache'
+      : 'no-store'
+    c.res.headers.set('Cache-Control', cache)
+  })
+
+  app.use('*', serveStatic({ root: distRoot }))
 
   app.get('*', async (c, next) => {
     if (c.req.path.startsWith('/assets/') || extname(c.req.path) !== '') {
       return c.text('Nerasta.', 404)
     }
-    return serveStatic({
-      root: distRoot,
-      path: 'index.html',
-      onFound: (_filePath, ctx) => {
-        ctx.header('Cache-Control', 'no-cache')
-      },
-    })(c, next)
+    return serveStatic({ root: distRoot, path: 'index.html' })(c, next)
   })
 
   return app

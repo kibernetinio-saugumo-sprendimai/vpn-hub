@@ -359,14 +359,14 @@ function InfrastructureNodesPage() {
                                 <span className="text-muted-foreground">
                                   Raktas:{' '}
                                   <strong className="font-medium text-foreground">
-                                    {node.keyExpiryDisabled ? 'Neterminuotas' : 'Su galiojimo terminu'}
+                                    {node.keyExpiryDisabled === undefined ? 'Nežinoma' : node.keyExpiryDisabled ? 'Neterminuotas' : 'Su galiojimo terminu'}
                                   </strong>
                                 </span>
                                 {!node.keyExpiryDisabled && (
                                   <Button
                                     variant="ghost"
                                     size="sm"
-                                    disabled={updateKeyMutation.isPending}
+                                    disabled={updateKeyMutation.isPending || node.keyExpiryDisabled === undefined}
                                     onClick={() => void enablePermanentKey(node)}
                                     className="h-7 rounded-lg px-2 text-xs"
                                   >

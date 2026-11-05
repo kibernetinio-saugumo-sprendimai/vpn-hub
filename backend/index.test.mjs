@@ -280,3 +280,61 @@ test('static asset mounting serves immutable hashed assets, SPA fallback, and 40
     rmSync(fixtureDir, { recursive: true, force: true })
   }
 })
+
+test('single-proxy login limits use the appended client address, not spoofed prefixes', async () => {
+  const app = createApp({ ...config, trustProxy: true })
+  for (let i = 0; i < 11; i++) {
+    const result = await app.request('/api/auth/login', post({ password: 'wrong' }, undefined, config.origin, {
+      'X-Forwarded-For': `198.51.100.${i + 1}, 203.0.113.10`,
+    }))
+    assert.equal(result.status, i < 10 ? 401 : 429)
+  }
+  await login(app, { 'X-Forwarded-For': '198.51.100.1, 203.0.113.11' })
+})
+
+test('equivalent IPv6 and IPv4-mapped client addresses share login budgets', async () => {
+  for (const addresses of [
+    ['2001:db8::1', '2001:0DB8:0:0:0:0:0:1'],
+    ['203.0.113.9', '::ffff:203.0.113.9'],
+  ]) {
+    const app = createApp({ ...config, trustProxy: true })
+    for (let i = 0; i < 11; i++) {
+      const result = await app.request('/api/auth/login', post({ password: 'wrong' }, undefined, config.origin, {
+        'X-Forwarded-For': addresses[i % 2],
+      }))
+      assert.equal(result.status, i < 10 ? 401 : 429)
+    }
+  }
+})
+
+test('malformed forwarded addresses cannot switch to an attacker supplied real-IP bucket', async () => {
+  const app = createApp({ ...config, trustProxy: true })
+  for (let i = 0; i < 11; i++) {
+    const result = await app.request('/api/auth/login', post({ password: 'wrong' }, undefined, config.origin, {
+      'X-Forwarded-For': `198.51.100.${i + 1}, invalid`,
+      'X-Real-IP': `198.51.100.${i + 1}`,
+    }))
+    assert.equal(result.status, i < 10 ? 401 : 429)
+  }
+})
+
+test('mutable files and SPA documents revalidate; missing files and API responses are not cached', async () => {
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'vpn-hub-cache-'))
+  try {
+    writeFileSync(join(fixtureDir, 'index.html'), '<title>SafeStack</title>')
+    writeFileSync(join(fixtureDir, 'theme-init.js'), '/* current theme */')
+    const app = mountStaticAssets(createApp(config), fixtureDir)
+    for (const method of ['GET', 'HEAD']) {
+      for (const path of ['/', '/index.html', '/app/servers', '/theme-init.js']) {
+        const response = await app.request(path, { method })
+        assert.equal(response.status, 200)
+        assert.equal(response.headers.get('cache-control'), 'no-cache', method + ' ' + path)
+      }
+    }
+    const missing = await app.request('/assets/missing.js')
+    assert.equal(missing.status, 404)
+    assert.equal(missing.headers.get('cache-control'), 'no-store')
+    const apiResponse = await app.request('/api/health')
+    assert.equal(apiResponse.headers.get('cache-control'), 'no-store')
+  } finally { rmSync(fixtureDir, { recursive: true, force: true }) }
+})

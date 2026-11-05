@@ -11,6 +11,7 @@ export class ApiError extends Error {
 type RequestOptions = {
   method?: 'GET' | 'POST' | 'DELETE'
   body?: unknown
+  signal?: AbortSignal
 }
 
 export async function api<T = unknown>(path: string, options?: RequestOptions): Promise<T> {
@@ -20,6 +21,7 @@ export async function api<T = unknown>(path: string, options?: RequestOptions): 
   const response = await fetch(path, {
     method,
     credentials: 'same-origin',
+    signal: options?.signal,
     headers: hasBody ? { 'Content-Type': 'application/json' } : undefined,
     body: hasBody ? JSON.stringify(options.body) : undefined,
   })

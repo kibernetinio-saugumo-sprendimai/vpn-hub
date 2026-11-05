@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.13.0"
   },
   "scripts": {
     "dev": "vite",
@@ -14,7 +14,7 @@
     "lint:types": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
     "lint:js": "eslint .",
     "lint": "npm run lint:types && npm run lint:js",
-    "test": "tsc -p tsconfig.server.json && node --test backend/*.test.mjs",
+    "test": "tsc -p tsconfig.server.json && node --import tsx --test backend/*.test.mjs src/lib/*.test.mjs",
     "password:hash": "node scripts/password-hash.mjs"
   },
   "dependencies": {
@@ -36,7 +36,7 @@
     "tailwind-merge": "^3.3.0"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.0",
+    "@eslint/js": "^10.0.0",
     "@tailwindcss/typography": "^0.5.19",
     "@tailwindcss/vite": "^4.1.13",
     "@tanstack/router-plugin": "^1.132.0",
@@ -44,7 +44,7 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.0.0",
-    "eslint": "^9.39.0",
+    "eslint": "^10.14.0",
     "eslint-plugin-react-hooks": "^7.0.0",
     "globals": "^16.4.0",
     "tailwindcss": "^4.1.13",
@@ -53,5 +53,11 @@
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.46.0",
     "vite": "^7.1.0"
+  },
+  "overrides": {
+    "minimatch": "^11.0.1",
+    "@tailwindcss/typography": {
+      "postcss-selector-parser": "^6.1.5"
+    }
   }
 }

@@ -46,12 +46,15 @@ Reikia Docker su Compose ir HTTPS reverse proxy (Caddy, Nginx ar pan.).
 ### Saugumo savybės
 - `HttpOnly`, `SameSite=Strict`, `Secure` sesijos slapukai (galioja 8 val., saugoma SHA-256 maiša serverio atmintyje).
 - Griežta `Origin` patikra visiems keičiantiems API kvietimams ir `Content-Security-Policy` be `unsafe-inline` skriptų.
-- Prisijungimo bandymų ribojimas pagal IP adresą (kai `TRUST_PROXY=true` už vietinio reverse proxy) bei bendras limitas.
+- Prisijungimo bandymų ribojimas pagal IP adresą (kai `TRUST_PROXY=true` už vieno patikimo vietinio reverse proxy) bei bendras limitas. Proxy turi perrašyti `X-Forwarded-For` arba jo gale pridėti tikrą kliento IP; naudojamas paskutinis adresas. Kelių proxy grandinės nepalaikomos. Tiesioginės prieigos prie backend prievado nepublikuokite.
+- Atsijungiant arba pasibaigus sesijai atšaukiamos senos užklausos ir pašalinama įrenginių talpykla.
+- Redaguojami maršrutai išlieka po foninio atnaujinimo; aptikus pakeitimą serveryje prieš saugant prašoma įkelti naują būseną.
+- HTML, vidiniai puslapiai ir nekoduoto pavadinimo failai tikrinami iš naujo; `/assets/` failai talpinami ilgam.
 - Konteineris veikia neprivilegijuotu `node` naudotoju su `read_only: true`, `cap_drop: [ALL]` ir `no-new-privileges`.
 
 ## Vietinis kūrimas ir paleidimas
 
-Reikalinga **Node.js >= 22.12**.
+Reikalinga **Node.js >= 22.13**.
 
 ```sh
 npm ci
@@ -81,6 +84,7 @@ Atidarykite `http://localhost:3000` – Vite automatiškai perduoda `/api` užkl
 npm run build
 npm run lint
 npm test
+npm audit --audit-level=moderate
 ```
 
 Paleidimas produkcijos režimu be Docker:

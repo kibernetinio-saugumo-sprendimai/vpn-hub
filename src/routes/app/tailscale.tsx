@@ -1,3 +1,4 @@
+import { getRouteDraft, hasRouteConflict, sameRoutes, type RouteDraft } from '@/lib/route-draft'
 import { useEffect, useMemo, useState } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
 import {
@@ -213,8 +214,10 @@ function TailscaleDevicesPage() {
     try {
       await updateRoutesMutation.mutateAsync({ deviceId: device.id, routes })
       toast.success('Patvirtinti įrenginio maršrutai atnaujinti.')
+      return true
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Nepavyko atnaujinti maršrutų.')
+      return false
     }
   }
 
@@ -416,7 +419,7 @@ function TailscaleDevicesPage() {
         onToggleKeyExpiry={(device, disabled) => void handleToggleKeyExpiry(device, disabled)}
         onRequestExpire={device => setConfirmExpireDevice(device)}
         onRequestDelete={device => setConfirmDeleteDevice(device)}
-        onSaveRoutes={(device, routes) => void handleSaveRoutes(device, routes)}
+        onSaveRoutes={handleSaveRoutes}
       />
 
       <ConfirmDialog
@@ -656,13 +659,9 @@ function DeviceDetailsSheet({
   onToggleKeyExpiry: (device: TailscaleDevice, keyExpiryDisabled: boolean) => void
   onRequestExpire: (device: TailscaleDevice) => void
   onRequestDelete: (device: TailscaleDevice) => void
-  onSaveRoutes: (device: TailscaleDevice, routes: string[]) => void
+  onSaveRoutes: (device: TailscaleDevice, routes: string[]) => Promise<boolean>
 }) {
-  const [draftRoutes, setDraftRoutes] = useState<string[]>([])
-
-  useEffect(() => {
-    setDraftRoutes(device?.enabledRoutes ?? [])
-  }, [device])
+  const [routeDraft, setRouteDraft] = useState<RouteDraft | null>(null)
 
   if (!device) {
     return (
@@ -684,17 +683,15 @@ function DeviceDetailsSheet({
   const status = getDeviceStatus(device)
   const keyInfo = getKeyExpiryInfo(device)
 
-  const toggleRoute = (route: string) => {
-    setDraftRoutes(current =>
-      current.includes(route) ? current.filter(item => item !== route) : [...current, route],
-    )
-  }
+  const currentDraft = getRouteDraft(device, routeDraft)
+  const draftRoutes = currentDraft.routes
+  const routeConflict = hasRouteConflict(device, currentDraft)
+  const routesChanged = !sameRoutes(draftRoutes, device.enabledRoutes)
 
-  const routesChanged = (() => {
-    if (draftRoutes.length !== device.enabledRoutes.length) return true
-    const currentSet = new Set(device.enabledRoutes)
-    return draftRoutes.some(route => !currentSet.has(route))
-  })()
+  const toggleRoute = (route: string) => {
+    setRouteDraft({ ...currentDraft, routes: draftRoutes.includes(route)
+      ? draftRoutes.filter(item => item !== route) : [...draftRoutes, route] })
+  }
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -804,10 +801,10 @@ function DeviceDetailsSheet({
             <div className="flex items-center justify-between gap-3 rounded-xl border border-border/80 p-3.5">
               <div>
                 <p className="text-sm font-medium">
-                  {device.authorized === false ? 'Laukia administratoriaus patvirtinimo' : 'Įrenginys patvirtintas'}
+                  {device.authorized === undefined ? 'Patvirtinimo būsena nežinoma' : device.authorized === false ? 'Laukia administratoriaus patvirtinimo' : 'Įrenginys patvirtintas'}
                 </p>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  {device.authorized === false
+                  {device.authorized === undefined ? 'Atnaujinkite duomenis prieš keisdami prieigą.' : device.authorized === false
                     ? 'Įrenginys negali pasiekti tailnet resursų, kol jo nepatvirtinsite.'
                     : 'Šis įrenginys turi leidimą jungtis prie tailnet.'}
                 </p>
@@ -815,7 +812,7 @@ function DeviceDetailsSheet({
               <Button
                 variant={device.authorized === false ? 'default' : 'outline'}
                 size="sm"
-                disabled={authorizeBusy}
+                disabled={authorizeBusy || device.authorized === undefined}
                 onClick={() => onToggleAuthorize(device, device.authorized === false)}
                 className="shrink-0 rounded-xl"
               >
@@ -848,7 +845,7 @@ function DeviceDetailsSheet({
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={keyBusy}
+                  disabled={keyBusy || device.keyExpiryDisabled === undefined}
                   onClick={() => onToggleKeyExpiry(device, !device.keyExpiryDisabled)}
                   className="rounded-xl text-xs"
                 >
@@ -878,6 +875,12 @@ function DeviceDetailsSheet({
               </div>
             ) : (
               <div className="space-y-3 rounded-xl border border-border/80 p-3.5">
+                {routeConflict && (
+                  <div role="alert" className="space-y-2 text-xs text-amber-700 dark:text-amber-400">
+                    <p>Maršrutai serveryje pasikeitė. Įkelkite naują būseną prieš išsaugodami.</p>
+                    <Button variant="outline" size="sm" onClick={() => setRouteDraft(null)}>Įkelti naują būseną</Button>
+                  </div>
+                )}
                 <div className="space-y-2">
                   {device.advertisedRoutes.map(route => {
                     const checked = draftRoutes.includes(route)
@@ -891,6 +894,7 @@ function DeviceDetailsSheet({
                           <input
                             type="checkbox"
                             checked={checked}
+                            disabled={routesBusy || routeConflict}
                             onChange={() => toggleRoute(route)}
                             className="size-4 rounded border-border accent-primary"
                           />
@@ -908,7 +912,8 @@ function DeviceDetailsSheet({
                     type="button"
                     variant="ghost"
                     size="sm"
-                    onClick={() => setDraftRoutes([...device.advertisedRoutes])}
+                    disabled={routesBusy || routeConflict}
+                    onClick={() => setRouteDraft({ ...currentDraft, routes: [...device.advertisedRoutes] })}
                     className="h-8 rounded-lg text-xs"
                   >
                     Pažymėti visus
@@ -916,8 +921,10 @@ function DeviceDetailsSheet({
                   <Button
                     type="button"
                     size="sm"
-                    disabled={!routesChanged || routesBusy}
-                    onClick={() => onSaveRoutes(device, draftRoutes)}
+                    disabled={!routesChanged || routesBusy || routeConflict}
+                    onClick={async () => {
+                      if (await onSaveRoutes(device, draftRoutes)) setRouteDraft(null)
+                    }}
                     className="h-8 rounded-xl text-xs"
                   >
                     {routesBusy ? 'Saugoma...' : 'Išsaugoti maršrutus'}

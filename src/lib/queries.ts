@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { api, ApiError } from './api'
 import type { DevicesResponse } from './tailscale'
 
@@ -10,10 +10,36 @@ export type SessionState = {
 export const AUTH_QUERY_KEY = ['auth', 'session'] as const
 export const DEVICES_QUERY_KEY = ['tailscale', 'devices'] as const
 
+const sessionGenerations = new WeakMap<QueryClient, number>()
+const sessionGeneration = (client: QueryClient) => sessionGenerations.get(client) ?? 0
+
+export async function handleSessionExpiry(queryClient: QueryClient, generation: number) {
+  if (generation === sessionGeneration(queryClient)) await setAuthSession(queryClient, { signedIn: false })
+}
+
+// Cancel old session responses before committing a login/logout/expiry transition.
+export async function setAuthSession(queryClient: QueryClient, session: SessionState) {
+  const generation = sessionGeneration(queryClient) + 1
+  sessionGenerations.set(queryClient, generation)
+  await queryClient.cancelQueries({ queryKey: AUTH_QUERY_KEY })
+  await queryClient.cancelQueries({ queryKey: DEVICES_QUERY_KEY })
+  if (generation !== sessionGeneration(queryClient)) return
+  queryClient.removeQueries({ queryKey: DEVICES_QUERY_KEY })
+  queryClient.setQueryData<SessionState>(AUTH_QUERY_KEY, session)
+}
+
 export function useAuthSession() {
+  const queryClient = useQueryClient()
   return useQuery({
     queryKey: AUTH_QUERY_KEY,
-    queryFn: () => api<SessionState>('/api/auth/session'),
+    queryFn: async ({ signal }) => {
+      const session = await api<SessionState>('/api/auth/session', { signal })
+      if (!session.signedIn) {
+        await queryClient.cancelQueries({ queryKey: DEVICES_QUERY_KEY })
+        queryClient.removeQueries({ queryKey: DEVICES_QUERY_KEY })
+      }
+      return session
+    },
     staleTime: 60_000,
     retry: false,
   })
@@ -27,12 +53,11 @@ export function useLoginMutation() {
         method: 'POST',
         body: { password },
       }),
-    onSuccess: data => {
-      queryClient.setQueryData<SessionState>(AUTH_QUERY_KEY, {
+    onSuccess: async data => {
+      await setAuthSession(queryClient, {
         signedIn: true,
         tailscaleConfigured: data.tailscaleConfigured,
       })
-      void queryClient.invalidateQueries({ queryKey: DEVICES_QUERY_KEY })
     },
   })
 }
@@ -45,10 +70,7 @@ export function useLogoutMutation() {
         method: 'POST',
         body: {},
       }),
-    onSuccess: () => {
-      queryClient.setQueryData<SessionState>(AUTH_QUERY_KEY, { signedIn: false })
-      queryClient.removeQueries({ queryKey: DEVICES_QUERY_KEY })
-    },
+    onSuccess: () => setAuthSession(queryClient, { signedIn: false }),
   })
 }
 
@@ -57,12 +79,13 @@ export function useDevicesQuery(enabled = true) {
   return useQuery({
     queryKey: DEVICES_QUERY_KEY,
     enabled,
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
+      const generation = sessionGeneration(queryClient)
       try {
-        return await api<DevicesResponse>('/api/tailscale/devices')
+        return await api<DevicesResponse>('/api/tailscale/devices', { signal })
       } catch (error) {
         if (error instanceof ApiError && error.status === 401) {
-          queryClient.setQueryData<SessionState>(AUTH_QUERY_KEY, { signedIn: false })
+          await handleSessionExpiry(queryClient, generation)
         }
         throw error
       }
@@ -82,12 +105,13 @@ function useDeviceMutation<TVariables>(mutationFn: (variables: TVariables) => Pr
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn,
+    onMutate: () => sessionGeneration(queryClient),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: DEVICES_QUERY_KEY })
+      return queryClient.invalidateQueries({ queryKey: DEVICES_QUERY_KEY })
     },
-    onError: error => {
-      if (error instanceof ApiError && error.status === 401) {
-        queryClient.setQueryData<SessionState>(AUTH_QUERY_KEY, { signedIn: false })
+    onError: async (error, _variables, generation) => {
+      if (error instanceof ApiError && error.status === 401 && generation !== undefined) {
+        await handleSessionExpiry(queryClient, generation)
       }
     },
   })
